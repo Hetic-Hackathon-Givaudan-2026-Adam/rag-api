@@ -42,6 +42,9 @@ MERCI_CONTEXTE = "Merci pour ces précisions, c'est un beau projet !"
 QUESTION_SUITE = "Souhaitez-vous recevoir un échantillon ou être recontacté par un expert ?"
 PHRASE_PARFUMEURS = "Leur intégration dans votre formule reste à valider avec nos parfumeurs."
 SUGGESTIONS_SUITE = ["Recevoir un échantillon", "Être recontacté par un expert"]
+# Après les propositions, le client dit d'abord si elles lui plaisent ou s'il veut autre chose.
+QUESTION_AVIS = "Ces deux ingrédients vous plaisent-ils, ou préférez-vous d'autres propositions ?"
+SUGGESTIONS_AVIS = ["Oui, ça me plaît", "Voir d'autres propositions", "Être recontacté par un expert"]
 SUGGESTIONS_CONFIRMATION = ["Oui, je confirme", "Annuler"]
 
 SYSTEM_PROMPT = """Tu es l'assistant de brief de Givaudan (Fragrance & Beauty). Tu aides des clients professionnels à décrire le parfum qu'ils veulent pour leur produit (lessive, shampoing, savon...).
@@ -276,6 +279,66 @@ def odeur_est_precise(odeur, avis_llm=False):
     return bool(avis_llm)
 
 
+ADJECTIFS_ODEUR = {"frais", "fraiche", "marin", "marine", "boise", "boisee", "fruite", "fruitee", "floral",
+                   "florale", "epice", "epicee", "vert", "verte", "doux", "douce", "sucre", "sucree", "chaud",
+                   "chaude", "propre", "aerien", "aerienne", "gourmand", "gourmande", "poudre", "poudree",
+                   "musque", "musquee", "ambre", "ambree", "leger", "legere", "fleuri", "fleurie",
+                   "vanillee", "citronne", "citronnee", "herbace", "herbacee"}
+
+
+def segments_odeur(odeur):
+    """Odeurs distinctes demandées : « linge propre avec de la vanille » -> ["linge propre", "vanille"].
+    « fraîche et marine » ne donne qu'une odeur (« fraîche » seule est vague)."""
+    morceaux = re.split(r",|/|\+|\bet\b|\bavec\b|\bainsi que\b|\bplus\b", odeur or "")
+    segments = []
+    for m in morceaux:
+        m = re.sub(r"^\s*(un peu |une touche |une note |des notes |notes? )?(de la |de l'|du |des |de |d'|la |le |les |l')",
+                   "", m.strip(), flags=re.I).strip(" .")
+        if m and odeur_est_precise(m) and _sans_accents(m) not in [_sans_accents(s) for s in segments]:
+            segments.append(m)
+    return segments
+
+
+def texte_odeur(segments):
+    """« une odeur de linge propre et de vanille », « une odeur fraîche et marine »."""
+    parties = []
+    for seg in segments:
+        premier = re.findall(r"[a-z]+", _sans_accents(seg))[:1]
+        seg = seg[:1].lower() + seg[1:]  # « une odeur fraîche », même si le client a écrit « Fraîche »
+        parties.append(seg if premier and premier[0] in ADJECTIFS_ODEUR else _de_odeur(seg))
+    return "une odeur " + " et ".join(parties)
+
+
+def _de_odeur(nom):
+    return ("d'" if _sans_accents(nom)[:1] in "aeiouyh" else "de ") + nom
+
+
+def mots_odeur_du_message(message):
+    """Mots d'odeur précis écrits par le client (« vanille »), hors noms de produit (« lessive en poudre »)."""
+    produit = _sans_accents(produit_mentionne(message))
+    trouves = []
+    for tok in re.findall(r"[A-Za-zÀ-ÿ-]+", message):
+        n = _sans_accents(tok)
+        if len(n) < 3 or (produit and n in produit.split()):
+            continue
+        if any(n.startswith(m) if len(m) >= 5 else n.rstrip("sx") == m for m in MOTS_ODEUR_PRECISE):
+            trouves.append(tok.lower())
+    return trouves
+
+
+def client_veut_autre_chose(message):
+    return re.search(r"\bautres?\b|n'aime pas|pas fan|different|pas ca\b|pas convaincu|\bbof\b|"
+                     r"ne me (plai|convien)|changer", _sans_accents(message)) is not None
+
+
+def client_satisfait(message):
+    texte = _sans_accents(message)
+    if re.search(r"\bpas\b|\bnon\b", texte) or client_veut_autre_chose(message):
+        return False
+    return re.search(r"\b(oui|me plait|me plaisent|ca me va|me convien\w*|j'aime|j'adore|parfait|super|top|"
+                     r"genial|tres bien|d'accord|ok)\b", texte) is not None
+
+
 # ---------- Intentions (mots-clés, prioritaires sur le LLM) ----------
 
 MOTS_INTENTION = {
@@ -499,7 +562,10 @@ def mettre_a_jour_brief(brief_actuel, message_client, dernier_message_assistant=
     produit_cite = produit_mentionne(message_client)
     if produit_cite:
         infos["hors_sujet"] = False  # le client parle de son produit : jamais hors sujet
-        if not brief["produit"]:
+        precis = produit_cite in APPLICATIONS or produit_cite in PRODUITS_CONNUS
+        ecrit = _sans_accents(brief["produit"]) in _sans_accents(message_client) if brief["produit"] else False
+        # Produit vide, ou le modèle a changé les mots du client (« eau de cologne » noté « eau de parfum »).
+        if not brief["produit"] or (precis and not ecrit and brief["produit"] != brief_actuel.get("produit")):
             brief["produit"] = produit_cite
     if not infos["hors_sujet"] and pays_mentionne(message_client):
         brief["pays"] = pays_mentionne(message_client)
@@ -508,6 +574,12 @@ def mettre_a_jour_brief(brief_actuel, message_client, dernier_message_assistant=
             _sans_accents(brief["entreprise"]).strip(), _sans_accents(brief_actuel.get("entreprise", "")).strip()):
         brief["pays"] = brief_actuel.get("pays", "") \
             if _sans_accents(brief_actuel.get("pays", "")) != _sans_accents(brief["entreprise"]) else ""
+    # Le modèle oublie parfois une odeur (« linge propre avec de la vanille » -> « linge propre ») : on l'ajoute.
+    if not infos["hors_sujet"] and brief["odeur"]:
+        manquants = [m for m in mots_odeur_du_message(message_client)
+                     if _sans_accents(m)[:5] not in _sans_accents(brief["odeur"])]
+        if manquants:
+            brief["odeur"] = f"{brief['odeur']}, {', '.join(dict.fromkeys(manquants))}"
     brief["odeur"] = corriger_fautes_odeur(brief["odeur"])
     brief["odeur_precise"] = odeur_est_precise(brief["odeur"], avis_precise)
     return brief, infos
@@ -612,6 +684,11 @@ def _phrase_fidele(phrase, a):
     for mot in MOTS_ODEUR_PRECISE:
         if _contient_mot(texte, mot) and not re.search(r"\b" + re.escape(mot[:5]), fiche):
             return False
+    # Pas de nom de produit (« idéale pour un shampoing » alors que le client fait une eau de Cologne).
+    produits = APPLICATIONS + PRODUITS_CONNUS + ["lessive", "shampoing", "shampooing", "savon", "adoucissant",
+                                                 "javel", "nettoyant"]  # (« linge » reste permis : « odeur de linge »)
+    if any(_contient_mot(texte, _sans_accents(p)) for p in produits):
+        return False
     # Une vraie phrase (pas une liste de mots : « propre, floral, frais »).
     return 3 <= len(phrase.split()) <= 30 and phrase.count(",") < 2 and re.search(r"\b(note|odeur|evoque)", texte)
 
@@ -779,11 +856,21 @@ class CatalogueRAG:
             # (le contexte du projet n'est pas utilisé ici : « Jeux olympiques, Nike » brouille la recherche d'odeur)
             v for v in (brief["produit"], brief["odeur"], brief["odeur"], brief["contraintes"], brief["cible"], question) if v
         )
-        # Si le client veut autre chose, on écarte les ingrédients déjà proposés.
-        exclure = session["derniers_proposes"] if re.search(
-            r"\bautre|n'aime pas|pas fan|different|pas ca\b", _sans_accents(question)) else ()
-        candidats = self.rechercher(texte_recherche, k=6, exclure=exclure, odeur=brief["odeur"])
-        choisis = candidats[:NB_PROPOSITIONS]
+        # Si le client veut autre chose, on écarte tous les ingrédients déjà proposés.
+        exclure = list(session["ingredients_proposes"]) if client_veut_autre_chose(question) else []
+        # Plusieurs odeurs demandées (« linge propre avec de la vanille ») : un ingrédient par odeur.
+        segments = segments_odeur(brief["odeur"])
+        choisis = []
+        if len(segments) >= 2:
+            for seg in segments[:NB_PROPOSITIONS]:
+                texte_seg = " ".join(v for v in (brief["produit"], seg, seg, brief["contraintes"]) if v)
+                deja = exclure + [a["id"] for a, _ in choisis]
+                meilleur = self.rechercher(texte_seg, k=1, exclure=deja, odeur=seg)
+                choisis += meilleur
+        if len(choisis) < NB_PROPOSITIONS:
+            deja = exclure + [a["id"] for a, _ in choisis]
+            choisis += self.rechercher(texte_recherche, k=NB_PROPOSITIONS - len(choisis), exclure=deja,
+                                       odeur=brief["odeur"])
         if not choisis:
             return ("Je ne trouve pas d'ingrédient de notre catalogue adapté à ce projet. "
                     f"{QUESTION_SUITE}"), []
@@ -807,21 +894,18 @@ class CatalogueRAG:
         for a, _ in choisis:
             lignes.append(self._ligne_ingredient(a, brief, texte_llm))
 
-        # Pour l'introduction, on garde la partie précise de l'odeur ("fraîche, linge propre" -> "linge propre").
-        morceaux = [m.strip() for m in re.split(r",|/", brief["odeur"]) if m.strip()]
-        odeur = next((m for m in morceaux if odeur_est_precise(m)), brief["odeur"]) or "votre projet"
-        # « une odeur fraîche et marine » (adjectif) mais « une odeur de linge propre » (nom).
-        adjectifs = {"frais", "fraiche", "marin", "marine", "boise", "boisee", "fruite", "fruitee", "floral",
-                     "florale", "epice", "epicee", "vert", "verte", "doux", "douce", "sucre", "sucree", "chaud",
-                     "chaude", "propre", "aerien", "aerienne", "gourmand", "gourmande", "poudre", "poudree",
-                     "musque", "musquee", "ambre", "ambree", "leger", "legere", "fleuri", "fleurie"}
-        premier = re.findall(r"[a-z]+", _sans_accents(odeur))[:1]
-        if premier and premier[0] in adjectifs:
-            de = ""
+        # Introduction : « une odeur de linge propre et de vanille », « une odeur fraîche et marine ».
+        if len(segments) >= 2 or (segments and "," in brief["odeur"]):
+            odeur_intro = texte_odeur(segments)
         else:
-            de = "d'" if _sans_accents(odeur)[:1] in "aeiouyh" else "de "
-        intro = (f"Deux ingrédients de notre catalogue évoquent une odeur {de}{odeur} :" if len(choisis) == 2
-                 else f"Un ingrédient de notre catalogue évoque une odeur {de}{odeur} :")
+            odeur_intro = texte_odeur([brief["odeur"]])  # garde « fraîche et marine » en entier
+        if exclure:
+            debut = ("Voici deux autres ingrédients de notre catalogue pour" if len(choisis) == 2
+                     else "Voici un autre ingrédient de notre catalogue pour")
+        else:
+            debut = ("Deux ingrédients de notre catalogue évoquent" if len(choisis) == 2
+                     else "Un ingrédient de notre catalogue évoque")
+        intro = f"{debut} {odeur_intro} :"
         conclusion = []
         apps = applications_demandees(brief["produit"])
         commune = next((app for app in apps
@@ -831,7 +915,8 @@ class CatalogueRAG:
             conclusion.append(f"{sujet} pour {ARTICLES[commune]}.")
         conclusion.append(PHRASE_PARFUMEURS if len(choisis) == 2 else
                           "Son intégration dans votre formule reste à valider avec nos parfumeurs.")
-        conclusion.append(QUESTION_SUITE)
+        conclusion.append(QUESTION_AVIS if len(choisis) == 2 else
+                          "Cet ingrédient vous plaît-il, ou préférez-vous d'autres propositions ?")
         texte = f"{intro}\n" + "\n".join(lignes) + "\n\n" + " ".join(conclusion)
 
         session["derniers_proposes"] = [a["id"] for a, _ in choisis]
@@ -993,20 +1078,23 @@ class CatalogueRAG:
             return resultat(demandes.texte_recap(recap), "recapitulatif", recapitulatif=recap,
                             suggestions=SUGGESTIONS_CONFIRMATION)
 
-        # « Oui » après des propositions, sans préciser : on demande quoi.
-        if intention == "confirmer" and session["derniers_proposes"]:
-            return resultat("Avec plaisir ! Préférez-vous recevoir un échantillon ou être recontacté par un expert ?",
+        autre_chose = client_veut_autre_chose(question)
+
+        # Les propositions plaisent (« Oui, ça me plaît ») : on passe à la suite, échantillon ou expert.
+        if session["derniers_proposes"] and not autre_chose and (intention == "confirmer" or client_satisfait(question)):
+            return resultat("Super ! Souhaitez-vous recevoir un échantillon ou être recontacté par un expert ?",
                             "propositions", suggestions=SUGGESTIONS_SUITE)
 
         # Question sur un ingrédient.
         cible = [ingredient] if ingredient else [self.par_id[i] for i in session["derniers_proposes"]]
-        if intention == "infos" and cible:
+        if intention == "infos" and cible and not autre_chose:
             return resultat(self._infos(session, question, brief, cible), "propositions",
                             ingredients=[(a, 0.0) for a in cible], suggestions=SUGGESTIONS_SUITE)
 
-        # g. Propositions : exactement 2 ingrédients.
+        # g. Propositions : exactement 2 ingrédients, puis le client dit si elles lui plaisent
+        #    (« Voir d'autres propositions » en propose deux nouvelles).
         texte, choisis = self._propositions(session, question, brief)
-        return resultat(texte, "propositions", ingredients=choisis, suggestions=SUGGESTIONS_SUITE)
+        return resultat(texte, "propositions", ingredients=choisis, suggestions=SUGGESTIONS_AVIS)
 
 
 def reponse_information_absente(question, ingredients):

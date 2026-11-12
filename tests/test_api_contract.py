@@ -21,12 +21,15 @@ class ApiContractTests(unittest.TestCase):
         cls.client.__exit__(None, None, None)
 
     def setUp(self):
-        main.SESSIONS.clear()
+        # Base SQLite temporaire : les tests ne touchent pas data/givaudan.db
+        self._tmp_base = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp_base.cleanup)
+        base_test = patch.object(main.base, 'BASE_PATH', str(Path(self._tmp_base.name) / 'test.db'))
+        base_test.start()
+        self.addCleanup(base_test.stop)
+        main.base.initialiser()
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        stockage = patch.object(main.demandes, 'DEMANDES_PATH', str(Path(tmp.name) / 'demandes.json'))
-        stockage.start()
-        self.addCleanup(stockage.stop)
 
     def test_catalogue_et_sante(self):
         health = self.client.get('/health').json()

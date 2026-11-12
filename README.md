@@ -13,6 +13,10 @@ Tout tourne en local avec Ollama (aucune API externe).
 - Ollama installé et lancé, avec les modèles :
   ```
   ollama pull qwen3.5:4b
+  ```
+  Modèle par défaut : `qwen3.5:4b`. Avec un autre modèle déjà installé, le choisir avant de lancer l'API
+  (ex. `set CHAT_MODEL=qwen2.5:3b`).
+  ```
   ollama pull bge-m3
   ```
 
@@ -21,6 +25,11 @@ Dans le dossier du projet :
 ```
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+Voix de synthèse locale (facultatif, pour que l'assistant parle avec une voix plus humaine) : télécharger
+les voix françaises Piper (~60 Mo chacune, non incluses dans le dépôt) :
+```
+.venv\Scripts\python.exe -m piper.download_voices --download-dir data/voix fr_FR-siwis-medium fr_FR-tom-medium
 ```
 
 ## 3. Lancer l'API
@@ -52,10 +61,20 @@ Avec le Swagger, ouvrir **http://localhost:8000/docs** :
 | `DELETE /sessions/{id}` | Supprimer une conversation (bouton « recommencer ») |
 | `GET /echantillons` | Page « Mes échantillons » : demandes d'échantillon enregistrées |
 | `GET /demandes` | Toutes les demandes (filtre `?type=echantillon` ou `?type=expert`) |
-| `GET /compte` | Compte client fictif de la démo (`data/compte_demo.json`) |
+| `GET /compte` | Compte client fictif de la démo (table `comptes`, repris de `data/compte_demo.json`) |
+| `GET /projets` | Mes projets : conversations enregistrées, les plus récentes d'abord (titre, entreprise, étape...) |
 | `GET /ingredients` | Lister le catalogue (filtre `famille` facultatif, ex. `?famille=Boisé`) |
 | `GET /ingredients/{id}` | Détail d'un ingrédient (ex. `/ingredients/FR026`) |
 | `GET /chat` | Page web de test |
+| `GET /tts/voix` | Voix de synthèse locales installées (Piper) |
+| `POST /tts` | Lire un texte avec une voix locale : `{"texte": "...", "voix": "fr_FR-siwis-medium"}` → son WAV |
+
+**Voix (Piper).** `POST /tts` génère la voix sur l'ordinateur, sans Internet, avec
+[Piper](https://github.com/OHF-Voice/piper1-gpl) (open source). Voix installées par défaut : Siwis (féminine,
+voix par défaut) et Tom (masculine), dans `data/voix/`. Les identifiants d'ingrédients (FR026) et les symboles
+sont retirés avant la lecture. La voix Siwis est chargée au démarrage de l'API pour que la première lecture
+soit immédiate ; une phrase prend environ une seconde à générer. Le front découpe les longues réponses en
+morceaux pour commencer à parler sans attendre.
 
 **Champs de la réponse de `POST /ask`**
 
@@ -73,7 +92,8 @@ Avec le Swagger, ouvrir **http://localhost:8000/docs** :
 ## 6. Fonctionnement : sessions et étapes
 
 **L'API garde la conversation.** Le front n'envoie que le `session_id` et le nouveau message. Les sessions
-sont en mémoire (perdues au redémarrage) et supprimées au bout de 2 heures.
+et leur historique sont enregistrés dans la base SQLite (voir section 10) : ils survivent aux redémarrages
+de l'API et `GET /projets` les liste.
 
 **Le LLM sert à comprendre le client et à rédiger** : à chaque message, il met à jour la fiche brief
 (entreprise, projet, produit, odeur, cible, contraintes, pays) et repère l'intention (échantillon, expert, confirmer, annuler,
@@ -86,9 +106,9 @@ infos) et l'ingrédient choisi. Une information n'est retenue que si le client l
 | `redirection` | candidature, presse, fournisseur, signalement éthique | oriente vers la bonne page de givaudan.com |
 | `recentrage` | message hors sujet (météo, sport...) | phrase polie puis question pour revenir au projet ; brief inchangé |
 | `decouverte` | contexte (entreprise, projet) pas encore demandé, ou produit, odeur **précise** ou pays manquant | d'abord le contexte (voir ci-dessous), puis 1 ou 2 questions sur ce qui manque (« frais » est trop vague : il demande quel type de fraîcheur) ; aucun ingrédient |
-| `propositions` | brief suffisant | **exactement 2 ingrédients** du catalogue, puis « Souhaitez-vous recevoir un échantillon ou être recontacté par un expert ? » |
+| `propositions` | brief suffisant | **exactement 2 ingrédients** du catalogue (un par odeur si le client en cite deux, ex. « linge propre avec de la vanille »), puis « Ces deux ingrédients vous plaisent-ils, ou préférez-vous d'autres propositions ? ». « Voir d'autres propositions » en donne deux nouveaux ; « Oui, ça me plaît » mène à « Souhaitez-vous recevoir un échantillon ou être recontacté par un expert ? » |
 | `recapitulatif` | le client veut un échantillon ou un expert | tableau à confirmer (adresse ou e-mail du compte démo) |
-| `terminee` | le client confirme | demande enregistrée dans `data/demandes.json`, avec un numéro |
+| `terminee` | le client confirme | demande enregistrée dans la base (table `demandes`), avec un numéro |
 
 Détails des propositions : les ingrédients déconseillés pour le produit sont exclus et ceux recommandés
 favorisés ; une fiche simplifiée, sans jargon, est donnée au modèle ; chaque phrase qu'il écrit est vérifiée
@@ -173,8 +193,7 @@ Réponse (raccourcie) :
   exclus. Pour un produit inconnu du catalogue (bougie, gel douche...), seule la proximité de sens compte.
 - **Jargon** : les mots techniques du catalogue (aldéhydé, lactonique, ozonique...) sont traduits en mots
   simples (propre, crémeux, aérien...).
-- **Demandes** : `data/demandes.json` est créé au premier enregistrement (écriture sûre). Pour repartir de
-  zéro, supprimer ce fichier.
+- **Demandes** : numérotées et enregistrées dans la base en une seule opération (pas de numéro en double).
 
 ## 8. Accès depuis un autre ordinateur (même Wi-Fi)
 1. Sur le PC qui lance l'API : `ipconfig` → noter l'**Adresse IPv4** (ex. 192.168.1.25).
@@ -239,6 +258,29 @@ télécharge l'agent ngrok. [Documentation pyngrok](https://pyngrok.readthedocs.
 ## Changer de modèle ou de catalogue
 Variables d'environnement `CHAT_MODEL`, `EMBED_MODEL` et `CATALOGUE_CSV`
 (ex. `set CHAT_MODEL=qwen2.5:7b`).
+
+## 10. Base de données (SQLite)
+
+Les conversations, les demandes et le compte sont stockés dans **`data/givaudan.db`**, une base SQLite
+(un seul fichier, intégré à Python : rien à installer). Elle est créée automatiquement au démarrage de l'API
+(`base.py`) et n'est pas envoyée sur GitHub : chacun a la sienne.
+
+| Table | Contenu |
+|---|---|
+| `sessions` | une conversation : étape, fiche brief, ingrédients proposés, récapitulatif en attente (JSON), dates |
+| `messages` | l'historique de chaque conversation (rôle client / assistant, texte, date) |
+| `demandes` | demandes d'échantillon et de contact expert (numéro, type, statut, date, détail en JSON) |
+| `comptes` | compte client ; le compte de démo est repris de `data/compte_demo.json` au premier démarrage |
+
+- Le **catalogue** reste dans `data/catalogue_fragrances.csv` (mis à jour par l'équipe Data).
+- Un ancien fichier `data/demandes.json` est repris automatiquement dans la base au premier démarrage.
+- **Repartir de zéro** : arrêter l'API puis supprimer `data/givaudan.db` (et les fichiers `givaudan.db-wal`,
+  `givaudan.db-shm` s'ils existent).
+- Pour consulter la base : l'outil gratuit [DB Browser for SQLite](https://sqlitebrowser.org/).
+- Autre emplacement : variable d'environnement `BASE_SQLITE` (ex. `set BASE_SQLITE=C:\chemin\demo.db`).
+
+Choix fait pour le prototype (rapide, sans serveur ni compte à créer, fonctionne hors connexion) ; le passage
+à une base serveur (PostgreSQL, MongoDB...) ne toucherait que `base.py`.
 
 ## Données
 `data/catalogue_fragrances.csv` : 30 ingrédients de parfumerie (molécules) issus de la bibliothèque
@@ -320,8 +362,8 @@ Ce parcours de compositions n'utilise pas le compte fictif de `/compte` : son ad
 pour la conversation. Le parcours ingrédients du nouveau chat conserve le compte fictif et les
 demandes échantillon ou expert de `demandes.py`. Utiliser exclusivement des données fictives pour ce prototype.
 Les demandes sont conservées dans `data/echantillons_demo.sqlite3` (ignoré par Git ; chemin configurable
-avec `ECHANTILLONS_DB`). Les sessions restent en mémoire et sont perdues au redémarrage, mais les demandes
-enregistrées restent consultables avec l'ancien `session_id`. Cet identifiant sert au filtrage du prototype ;
+avec `ECHANTILLONS_DB`). Les sessions sont enregistrées dans la base `data/givaudan.db` (section 10) et
+survivent aux redémarrages ; les demandes restent consultables avec leur `session_id`. Cet identifiant sert au filtrage du prototype ;
 il ne remplace pas une authentification de compte client.
 
 Aucune expédition ni commande commerciale n'est déclenchée. Le seul statut disponible est `enregistree`.

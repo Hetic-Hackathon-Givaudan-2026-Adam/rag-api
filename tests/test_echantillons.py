@@ -24,7 +24,13 @@ class EchantillonsTests(unittest.TestCase):
         cls.client.__exit__(None, None, None)
 
     def setUp(self):
-        main.SESSIONS.clear()
+        # Base SQLite temporaire : les tests ne touchent pas data/givaudan.db
+        self._tmp_base = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp_base.cleanup)
+        base_test = patch.object(main.base, 'BASE_PATH', str(Path(self._tmp_base.name) / 'test.db'))
+        base_test.start()
+        self.addCleanup(base_test.stop)
+        main.base.initialiser()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db = patch.object(echantillons, 'DB_PATH', Path(self.tmp.name) / 'demandes.sqlite3')
@@ -98,7 +104,7 @@ class EchantillonsTests(unittest.TestCase):
         with patch('echantillons._connexion', side_effect=sqlite3.OperationalError('indisponible')):
             response = self.confirm(proposal['jeton_confirmation'])
         self.assertEqual(response.status_code, 503)
-        self.assertIsNone(main.SESSIONS[self.sid]['demande_echantillon'])
+        self.assertIsNone(main.base.charger_session(self.sid)['demande_echantillon'])
         self.assertEqual(echantillons.lister(self.sid), [])
 
     def test_sessions_distinctes_et_persistance_sqlite(self):
@@ -120,7 +126,7 @@ class EchantillonsTests(unittest.TestCase):
     def test_changement_produit_invalide_confirmation(self):
         self.ask('Un savon solide boisé pour la France.')
         self.ask('Je voudrais essayer Bois doux.', adresse_livraison=ADRESSE)
-        token = main.SESSIONS[self.sid]['confirmation_echantillon']['jeton_confirmation']
+        token = main.base.charger_session(self.sid)['confirmation_echantillon']['jeton_confirmation']
         self.ask('Finalement, ce sera une lessive.')
         self.assertEqual(self.confirm(token).status_code, 409)
         self.assertEqual(echantillons.lister(self.sid), [])
