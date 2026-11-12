@@ -4,3 +4,9 @@ __pycache__/
 .env
 ngrok.yml
 data/demandes.json
+# Modèles de voix Piper (~60 Mo chacun) : à télécharger, voir README section Voix
+data/voix/
+# Base SQLite locale (créée au démarrage de l'API)
+data/givaudan.db
+data/givaudan.db-wal
+data/givaudan.db-shm

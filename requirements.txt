@@ -3,3 +3,4 @@ uvicorn[standard]
 ollama
 numpy
 pyngrok>=7.2,<10
+piper-tts>=1.3

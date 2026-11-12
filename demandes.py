@@ -1,16 +1,11 @@
 """
 Compte client de démo, récapitulatifs et enregistrement des demandes (échantillon / expert).
 Tout est fait par le code avec des textes modèles : fiable à 100 %, aucun appel au LLM.
+Les demandes et le compte sont stockés dans la base SQLite (voir base.py).
 """
-import json
-import os
-import tempfile
-import threading
 from datetime import datetime
 
-DOSSIER = os.path.dirname(os.path.abspath(__file__))
-COMPTE_PATH = os.path.join(DOSSIER, "data", "compte_demo.json")
-DEMANDES_PATH = os.getenv("DEMANDES_JSON", os.path.join(DOSSIER, "data", "demandes.json"))
+import base
 
 PREFIXES = {"echantillon": "ECH-DEMO", "expert": "EXP-DEMO"}
 QUESTIONS_CONFIRMATION = {
@@ -18,44 +13,20 @@ QUESTIONS_CONFIRMATION = {
     "expert": "Confirmez-vous que nous transmettions ce projet à un expert Givaudan ?",
 }
 
-_verrou = threading.Lock()
-
 
 def charger_compte():
-    with open(COMPTE_PATH, encoding="utf-8") as f:
-        return json.load(f)
+    return base.compte()
 
 
 def lister_demandes(type_=None):
-    if not os.path.exists(DEMANDES_PATH):
-        return []
-    try:
-        with open(DEMANDES_PATH, encoding="utf-8") as f:
-            demandes = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
-    if not isinstance(demandes, list):
-        return []
-    return [d for d in demandes if not type_ or d.get("type") == type_]
-
-
-def _ecrire(demandes):
-    """Écriture sûre : fichier temporaire puis remplacement (jamais de fichier à moitié écrit)."""
-    dossier = os.path.dirname(DEMANDES_PATH)
-    os.makedirs(dossier, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=dossier, suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(demandes, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, DEMANDES_PATH)
+    return base.lister_demandes(type_)
 
 
 def enregistrer_demande(recap, session_id, brief):
     """Enregistre la demande en attente et renvoie son numéro (ECH-DEMO-001, EXP-DEMO-001...)."""
     type_ = recap["type"]
-    with _verrou:
-        demandes = lister_demandes()
-        rang = sum(1 for d in demandes if d.get("type") == type_) + 1
-        numero = f"{PREFIXES[type_]}-{rang:03d}"
+
+    def fabriquer(numero):
         demande = {
             "numero": numero,
             "type": type_,
@@ -69,9 +40,9 @@ def enregistrer_demande(recap, session_id, brief):
             demande["ingredient"] = recap["ingredient"]
         else:
             demande["ingredients_interet"] = recap["ingredients_interet"]
-        demandes.append(demande)
-        _ecrire(demandes)
-    return numero
+        return demande
+
+    return base.ajouter_demande(fabriquer, type_, PREFIXES[type_])
 
 
 def message_confirmation(type_, numero):

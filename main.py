@@ -6,30 +6,36 @@ Swagger : http://localhost:8000/docs   —   Page de test : http://localhost:800
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 import demandes
+import base
 import rag
+import tts
 
 etat = {"rag": None, "erreur": None}
 
-# Sessions en mémoire (démo : pas de base de données, tout est perdu au redémarrage).
-SESSIONS = {}
-DUREE_SESSION = timedelta(hours=2)
+# Les conversations et les demandes sont stockées dans la base SQLite data/givaudan.db (voir base.py) :
+# elles survivent aux redémarrages de l'API.
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    base.initialiser()
     try:
         etat["rag"] = rag.CatalogueRAG()
     except Exception as e:  # Ollama éteint, modèle absent, CSV introuvable...
         etat["erreur"] = str(e)
+    # Charge la voix Piper par défaut en arrière-plan : la première lecture est ainsi immédiate.
+    if tts.disponible():
+        import threading
+        threading.Thread(target=lambda: tts.synthetiser("Bonjour."), daemon=True).start()
     yield
 
 
@@ -168,18 +174,10 @@ class Compte(BaseModel):
 
 # ---------- Sessions ----------
 
-def _purger_sessions():
-    limite = datetime.now() - DUREE_SESSION
-    for sid in [sid for sid, s in SESSIONS.items() if s["cree_le"] < limite]:
-        del SESSIONS[sid]
-
-
-def _nouvelle_session():
-    _purger_sessions()
-    sid = str(uuid.uuid4())
+def _session_vide():
     brief = {c: "" for c in rag.CHAMPS_TEXTE}
     brief["odeur_precise"] = False
-    SESSIONS[sid] = {
+    return {
         "messages": [{"role": "assistant", "content": rag.MESSAGE_ACCUEIL}],
         "brief": brief,
         "etape": "decouverte",
@@ -190,13 +188,29 @@ def _nouvelle_session():
         "questions_contexte": 0,  # nombre de questions déjà posées sur l'entreprise / le projet
         "cree_le": datetime.now(),
     }
+
+
+def _completer(session):
+    """Ajoute les champs manquants (sessions enregistrées par une version précédente de l'API)."""
+    vide = _session_vide()
+    for cle, valeur in vide.items():
+        session.setdefault(cle, valeur)
+    for cle, valeur in vide["brief"].items():
+        session["brief"].setdefault(cle, valeur)
+    return session
+
+
+def _nouvelle_session():
+    sid = str(uuid.uuid4())
+    base.enregistrer_session(sid, _session_vide())
     return sid
 
 
 def _session(session_id):
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="Session introuvable (expirée ou supprimée).")
-    return SESSIONS[session_id]
+    session = base.charger_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session introuvable (supprimée).")
+    return _completer(session)
 
 
 def _rag():
@@ -232,12 +246,16 @@ def creer_session():
           summary="Envoyer un message du client à l'assistant de brief")
 def ask(demande: DemandeQuestion):
     moteur = _rag()
-    sid = demande.session_id if demande.session_id in SESSIONS else _nouvelle_session()
-    session = SESSIONS[sid]
+    session = base.charger_session(demande.session_id)
+    if session is None:
+        sid, session = str(uuid.uuid4()), _session_vide()
+    else:
+        sid, session = demande.session_id, _completer(session)
     try:
         r = moteur.tour(session, demande.question, session_id=sid)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Erreur Ollama : {e}")
+    base.enregistrer_session(sid, session)  # étape, brief et nouveaux messages
     return ReponseQuestion(
         session_id=sid,
         reponse=r["reponse"],
@@ -263,9 +281,40 @@ def detail_session(session_id: str):
 
 @app.delete("/sessions/{session_id}", tags=["Conversation"], summary="Supprimer une session (recommencer)")
 def supprimer_session(session_id: str):
-    _session(session_id)
-    del SESSIONS[session_id]
+    if not base.supprimer_session(session_id):
+        raise HTTPException(status_code=404, detail="Session introuvable (supprimée).")
     return {"supprimee": True, "session_id": session_id}
+
+
+class ProjetResume(BaseModel):
+    session_id: str
+    titre: str = Field(..., description="Projet, sinon produit, sinon « Nouveau projet ».")
+    entreprise: str
+    produit: str
+    odeur: str
+    etape: Etape
+    nb_messages: int = Field(..., description="Nombre de messages du client.")
+    cree_le: datetime
+    modifie_le: datetime
+
+
+@app.get("/projets", response_model=List[ProjetResume], tags=["Conversation"],
+         summary="Mes projets : conversations enregistrées, les plus récentes d'abord")
+def lister_projets(limite: int = Query(50, ge=1, le=200), avec_vides: bool = Query(
+        False, description="Inclure les conversations où le client n'a encore rien écrit.")):
+    projets = []
+    for s in base.lister_sessions(limite):
+        if s["nb_messages"] == 0 and not avec_vides:
+            continue
+        brief = s["etat"].get("brief", {})
+        titre = brief.get("projet") or brief.get("produit") or "Nouveau projet"
+        projets.append(ProjetResume(
+            session_id=s["id"], titre=titre[:1].upper() + titre[1:], entreprise=brief.get("entreprise", ""),
+            produit=brief.get("produit", ""), odeur=brief.get("odeur", ""),
+            etape=s["etat"].get("etape", "decouverte"), nb_messages=s["nb_messages"],
+            cree_le=s["cree_le"], modifie_le=s["modifie_le"],
+        ))
+    return projets
 
 
 @app.get("/echantillons", tags=["Demandes"], summary="Mes échantillons (demandes d'échantillon enregistrées)")
@@ -281,6 +330,33 @@ def lister_toutes_demandes(type: Optional[Literal["echantillon", "expert"]] = Qu
 @app.get("/compte", response_model=Compte, tags=["Demandes"], summary="Compte client de démo")
 def compte():
     return demandes.charger_compte()
+
+
+class DemandeVoix(BaseModel):
+    model_config = {"json_schema_extra": {"examples": [{
+        "texte": "Bonjour, je suis l'assistant Givaudan. Parlez-moi de votre projet de parfum.",
+        "voix": "fr_FR-siwis-medium",
+    }]}}
+
+    texte: str = Field(..., max_length=3000, description="Texte à lire (les identifiants FRxxx sont retirés).")
+    voix: Optional[str] = Field(None, description="Identifiant d'une voix de GET /tts/voix (par défaut : Siwis).")
+
+
+@app.get("/tts/voix", tags=["Voix"], summary="Voix de synthèse locales installées (Piper)")
+def voix_disponibles():
+    return {"disponible": tts.disponible(), "voix": tts.lister_voix()}
+
+
+@app.post("/tts", tags=["Voix"], summary="Lire un texte avec une voix locale (renvoie un fichier WAV)",
+          response_class=Response, responses={200: {"content": {"audio/wav": {}}}})
+def synthese_vocale(demande: DemandeVoix):
+    if not tts.disponible():
+        raise HTTPException(status_code=503, detail="Piper n'est pas installé ou aucune voix n'est dans data/voix.")
+    try:
+        son = tts.synthetiser(demande.texte, demande.voix)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur de synthèse vocale : {e}")
+    return Response(content=son, media_type="audio/wav")
 
 
 @app.get("/chat", include_in_schema=False)
