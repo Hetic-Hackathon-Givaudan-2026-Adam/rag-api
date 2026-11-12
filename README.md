@@ -2,9 +2,9 @@
 
 API FastAPI qui aide un client professionnel (marque de lessive, de shampoing, de savon...) à décrire
 le parfum qu'il souhaite pour son produit. Givaudan crée des parfums **sur mesure** : l'assistant ne vend
-rien, il propose 2 ou 3 **pistes olfactives** illustrées par de vrais ingrédients du catalogue, puis pose
-une ou deux questions pour préparer le brief envoyé au commercial. Jamais de prix, de délai ni de promesse
-de produit fini.
+rien. Il commence par comprendre le besoin, propose ensuite 2 ou 3 **pistes olfactives** illustrées par de
+vrais ingrédients du catalogue, puis affine avec le client pour préparer le brief envoyé au commercial.
+Jamais de prix, de délai ni de promesse de produit fini.
 
 Tout tourne en local avec Ollama (aucune API externe).
 
@@ -31,52 +31,113 @@ Le premier démarrage prend un peu de temps (calcul des embeddings du catalogue,
 `data/embeddings_cache_fragrances.npz`), les suivants sont rapides.
 
 ## 4. Tester
-Ouvrir **http://localhost:8000/docs** (Swagger), puis `POST /ask` → *Try it out* → *Execute*.
+Ouvrir **http://localhost:8000/docs** (Swagger) :
+1. `POST /sessions` → *Try it out* → *Execute* : copier le `session_id`.
+2. `POST /ask` → coller le `session_id` dans le corps, écrire la `question` → *Execute*.
+3. Recommencer l'étape 2 avec le même `session_id` pour continuer la conversation.
 
 ## 5. Routes
 | Route | Rôle |
 |---|---|
 | `GET /health` | Vérifier que l'API et Ollama fonctionnent (`nb_ingredients`) |
-| `POST /ask` | Décrire son projet : réponse de l'assistant + ingrédients cités |
+| `POST /sessions` | Démarrer une conversation : renvoie `session_id` et le message d'accueil |
+| `POST /ask` | Envoyer un message du client : réponse, étape, brief, ingrédients cités |
+| `GET /sessions/{id}` | Historique complet, brief et étape d'une conversation |
+| `DELETE /sessions/{id}` | Supprimer une conversation (bouton « recommencer ») |
 | `GET /ingredients` | Lister le catalogue (filtre `famille` facultatif, ex. `?famille=Boisé`) |
 | `GET /ingredients/{id}` | Détail d'un ingrédient (ex. `/ingredients/FR026`) |
 
-Exemple de corps pour `POST /ask` :
+## 6. Fonctionnement : sessions et étapes
+
+**L'API garde la conversation.** Le front n'envoie que le `session_id` et le nouveau message ; il n'a plus
+besoin de renvoyer l'historique. Si `session_id` est absent ou inconnu, une nouvelle session est créée et
+son identifiant est renvoyé. Les sessions sont gardées en mémoire (pas de base de données : elles sont
+perdues au redémarrage) et supprimées au bout de 2 heures.
+
+**Une fiche brief est remplie au fil des messages** : `produit`, `ambiance`, `cible`, `contraintes`, `pays`.
+Seules les informations vraiment données par le client sont notées. Le modèle ne reçoit que les 10 derniers
+messages, mais le brief garde l'essentiel.
+
+**C'est le code qui choisit l'étape**, pas le modèle (le petit modèle `qwen2.5:3b` suit mal les consignes
+longues) :
+
+| Étape (`etape`) | Quand | Ce que fait l'assistant |
+|---|---|---|
+| `decouverte` | le produit ou l'ambiance n'est pas encore connu | reformule et pose une question ; **aucun ingrédient** (le catalogue ne lui est même pas fourni) |
+| `pistes` | produit et ambiance connus, rien encore proposé | résume le besoin, propose 2 ou 3 pistes avec des ingrédients, demande laquelle plaît le plus |
+| `affinage` | des pistes ont déjà été proposées | tient compte de la réaction du client, approfondit, demande ce qui manque encore (cible, contraintes...) ; quand le brief est complet, propose un récapitulatif pour les experts |
+| `recentrage` | message hors sujet (météo, sport...) | phrase polie puis question pour revenir au projet ; brief inchangé |
+| `redirection` | candidature, presse, fournisseur, signalement éthique | oriente vers la bonne page de givaudan.com |
+
+La question de fin de chaque réponse est choisie par le code d'après ce qui manque dans le brief :
+l'assistant ne repose donc jamais une question déjà répondue.
+
+### Exemple de conversation en 3 messages
+
+**1.** `POST /sessions` → `{"session_id": "63205d24-…", "message_accueil": "Bonjour et bienvenue chez Givaudan ! Parlez-moi de votre projet : quel parfum imaginez-vous, et pour quel produit ?"}`
+
+**2.** `POST /ask`
+```json
+{ "session_id": "63205d24-…", "question": "Je cherche un parfum d'été", "nb_resultats": 3 }
+```
 ```json
 {
-  "question": "Je cherche un parfum frais et estival pour ma lessive",
-  "historique": [],
-  "nb_resultats": 3
+  "session_id": "63205d24-…",
+  "reponse": "Parfait, vous souhaitez un parfum qui évoque l'été pour votre produit. C'est une idée très lumineuse.\n\nPour quel produit imaginez-vous ce parfum : une lessive, un shampoing, un savon, une bougie… ?",
+  "etape": "decouverte",
+  "brief": { "produit": "", "ambiance": "été", "cible": "", "contraintes": "", "pays": "" },
+  "ingredients_proposes": []
 }
 ```
-Exemple de réponse (raccourcie) :
+
+**3.** `POST /ask`
+```json
+{ "session_id": "63205d24-…", "question": "C'est pour une lessive liquide", "nb_resultats": 3 }
+```
 ```json
 {
-  "reponse": "Bonjour, pour un parfum frais et estival pour votre lessive, voici quelques pistes : ... Florhydral™ (FR003) ... Quelle est la cible de votre produit ?",
+  "session_id": "63205d24-…",
+  "reponse": "Pour une lessive liquide, voici quelques pistes olfactives qui évoquent l'été :\n\n… — Nectaryl (FR011) : une note fruitée et naturelle…\n\n… — Lemonile™ (FR006) : une note intense et fraîche…\n\nMenthe fraîche — Freskomenthe™ (FR024) : une note fraîche…\n\nQuelle piste vous parle le plus ?",
+  "etape": "pistes",
+  "brief": { "produit": "lessive", "ambiance": "été", "cible": "", "contraintes": "", "pays": "" },
   "ingredients_proposes": [
-    { "id": "FR003", "nom": "Florhydral™", "famille_olfactive": "Floral", "notes": "Floral ; Vert ; Muguet ; Frais ; Puissant", "...": "...", "score": 0.71 }
+    { "id": "FR011", "nom": "Nectaryl", "famille_olfactive": "Fruité", "...": "...", "score": 0.68 },
+    { "id": "FR006", "nom": "Lemonile™", "...": "..." },
+    { "id": "FR024", "nom": "Freskomenthe™", "...": "..." }
   ]
 }
 ```
-`ingredients_proposes` est vide quand l'assistant pose seulement une question ou que la demande
-ne concerne pas un projet de parfum (candidature, presse... → redirection polie vers givaudan.com).
 
-Pour continuer une conversation, renvoyer les messages précédents dans `historique`
-(`{"role": "user" | "assistant", "content": "..."}`).
+**4.** `POST /ask`
+```json
+{ "session_id": "63205d24-…", "question": "Je préfère la piste marine, et ce serait pour des familles", "nb_resultats": 3 }
+```
+```json
+{
+  "session_id": "63205d24-…",
+  "reponse": "Ultrazur™ (FR027) : une note fraîche et ozonique…\n\nNectaryl (FR011) : …idéale pour des familles.\n\nAvez-vous des contraintes particulières : ingrédients d'origine naturelle, biodégradabilité… ?",
+  "etape": "affinage",
+  "brief": { "produit": "lessive", "ambiance": "marine", "cible": "familles", "contraintes": "", "pays": "" },
+  "ingredients_proposes": [ { "id": "FR027", "nom": "Ultrazur™", "...": "..." }, { "id": "FR011", "nom": "Nectaryl", "...": "..." } ]
+}
+```
 
-## 6. Règles appliquées dans le code
+`ingredients_proposes` ne contient que les ingrédients cités dans la réponse **et** fournis par le
+catalogue : la liste est vide en découverte, recentrage et redirection.
+
+## 7. Autres règles appliquées dans le code
 - **Usage** : si le client cite son produit (lessive, linge, shampoing, savon, déodorant, nettoyant,
   javel...), les ingrédients recommandés pour ce produit sont favorisés et ceux déconseillés sont exclus.
   Pour un produit inconnu du catalogue (bougie, gel douche...), seule la proximité de sens compte.
-- **Hors sujet** : candidature, presse, fournisseur, signalement éthique... → réponse fixe, sans conseil.
-- Les identifiants d'ingrédients mal recopiés par le modèle sont corrigés.
+- Les identifiants d'ingrédients oubliés ou mal recopiés par le modèle sont corrigés, et les passages
+  recopiés de la réponse précédente sont retirés.
 
-## 7. Accès depuis un autre ordinateur (même Wi-Fi)
+## 8. Accès depuis un autre ordinateur (même Wi-Fi)
 1. Sur le PC qui lance l'API : `ipconfig` → noter l'**Adresse IPv4** (ex. 192.168.1.25).
 2. Autoriser Python si le pare-feu Windows le demande.
 3. Le collègue ouvre `http://192.168.1.25:8000/docs`.
 
-## 8. Partager l'API avec ngrok
+## 9. Partager l'API avec ngrok
 
 Le script `expose.py` ouvre une URL HTTPS vers l'API locale. Le Swagger et les routes de l'API
 sont accessibles à cette même adresse. Le tunnel reste actif pendant que le script tourne.
@@ -127,7 +188,7 @@ Invoke-RestMethod -Uri 'https://VOTRE-ADRESSE.ngrok-free.app/health' -Headers @{
 }
 ```
 
-Pour `POST /ask`, Tech peut utiliser le corps JSON de la section 5. Le statut `/health` permet
+Pour `POST /ask`, Tech peut utiliser les corps JSON de la section 6. Le statut `/health` permet
 de vérifier séparément si le moteur RAG est prêt. Lors du premier lancement, `pyngrok`
 télécharge l'agent ngrok. [Documentation pyngrok](https://pyngrok.readthedocs.io/en/latest/)
 
