@@ -2,3 +2,4 @@ fastapi
 uvicorn[standard]
 ollama
 numpy
+pyngrok>=7.2,<10
