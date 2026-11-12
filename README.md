@@ -12,7 +12,7 @@ Tout tourne en local avec Ollama (aucune API externe).
 - Python 3.10 ou plus
 - Ollama installé et lancé, avec les modèles :
   ```
-  ollama pull qwen2.5:3b
+  ollama pull qwen3.5:4b
   ollama pull bge-m3
   ```
 
@@ -79,7 +79,7 @@ sont en mémoire (perdues au redémarrage) et supprimées au bout de 2 heures.
 (entreprise, projet, produit, odeur, cible, contraintes, pays) et repère l'intention (échantillon, expert, confirmer, annuler,
 infos) et l'ingrédient choisi. Une information n'est retenue que si le client l'a vraiment écrite.
 
-**Le code décide de tout le reste**, avec des textes modèles fiables à 100 % :
+**Le code décide de tout le reste**, avec des textes modèles :
 
 | Étape (`etape`) | Quand | Ce que fait l'assistant |
 |---|---|---|
@@ -244,3 +244,85 @@ Variables d'environnement `CHAT_MODEL`, `EMBED_MODEL` et `CATALOGUE_CSV`
 `data/catalogue_fragrances.csv` : 30 ingrédients de parfumerie (molécules) issus de la bibliothèque
 de molécules du site **givaudan.com** (lien source dans la colonne `url_source`). Données utilisées
 uniquement pour une démo de hackathon (HETIC x Givaudan).
+
+Les identifiants `FR001` à `FR030` sont internes à la démonstration : ce ne sont pas les codes
+commerciaux Givaudan. Le champ `tenue` correspond à la tenue sur mouillette, pas à celle du produit
+fini. Une application indiquée dans le CSV ne remplace pas une validation réglementaire ou des essais.
+Une case vide représente une information inconnue ; les origines et les données de durabilité
+restent notamment incomplètes. Les liens sources permettent de consulter les fiches d'origine.
+
+## Évaluer les réponses avec Ollama
+
+Après le démarrage de l'API, exécuter dans un autre terminal :
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluer_rag.py --url http://127.0.0.1:8000
+```
+
+Le script envoie dix scénarios et enregistre les questions, réponses, durées et contrôles dans
+`evaluation/resultats_rag.json` et une version lisible `evaluation/resultats_rag.html`.
+Les contrôles automatiques portent sur les références, les sources, les exclusions d'usage,
+les prix inventés et certaines demandes de clarification. Ils ne mesurent pas à eux seuls la qualité
+métier ; il faut relire les réponses. `--cas savon_boise,reference_inconnue` limite un essai.
+
+Les salutations simples, les références inconnues et les informations commerciales ou de conformité
+manquantes reçoivent une réponse fixe, conservée dans la session. Les briefs incomplets suivent
+l'étape découverte de la conversation. Les pistes olfactives sont rédigées par le modèle lorsque
+le produit et l'ambiance sont connus. Le script de test crée des sessions et réutilise leurs identifiants.
+
+Les contrôles du contrat et de la progression des sessions se lancent avec :
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Ils utilisent le catalogue local indexé. Les réponses Ollama sont simulées dans les tests de progression
+pour isoler la gestion des étapes ; les essais du script d'évaluation appellent réellement Ollama.
+
+## Parcours échantillons de démonstration
+
+Le catalogue réel contient des **ingrédients**, pas des compositions commandables. Le fichier
+`data/compositions_demo.json` ajoute deux **compositions fictives** : `DEMO-BOIS-01` Bois doux
+et `DEMO-BOIS-02` Bois frais. Leur compatibilité reste à valider. Elles ne sont pas mélangées aux
+références `FRxxx` et n'ont ni prix ni stock réel.
+
+Le parcours est guidé par le code et ne demande pas au LLM de décider d'un enregistrement.
+Toutes les routes sont accessibles dans Swagger, sous **Échantillons démo** et **Conversation**.
+
+1. `POST /sessions` avec `{"parcours":"echantillons_demo"}`. Copier le `session_id`.
+2. `POST /ask` avec le même `session_id` et le message
+   « Bonjour, je développe une gamme de savons. Je cherche une senteur boisée et discrète. ».
+3. Envoyer « Des savons solides, pour le marché français. ». Les deux compositions sont proposées.
+4. Envoyer « Je voudrais essayer Bois doux. ». L'assistant demande une adresse.
+5. `POST /sessions/{session_id}/adresse` avec une **adresse fictive**, par exemple :
+
+```json
+{
+  "entreprise": "Entreprise Démo",
+  "ligne1": "10 rue Exemple",
+  "code_postal": "75000",
+  "ville": "Paris",
+  "pays": "France"
+}
+```
+
+6. Lire le récapitulatif, puis envoyer « Oui, je confirme. » via `POST /ask` avec le même identifiant.
+   L'API renvoie un numéro `ECH-DEMO-...` seulement après l'enregistrement SQLite réussi.
+7. `GET /echantillons?session_id=...` représente **Mes échantillons**.
+   `GET /echantillons/{demande_id}?session_id=...` donne le statut de la demande.
+
+Autre possibilité pour Tech : `POST /echantillons/preparer` avec `session_id`, `reference` et
+`adresse_livraison`. Ce n'est qu'un récapitulatif. Copier son `jeton_confirmation`, puis appeler
+`POST /echantillons/confirmer` avec `session_id`, `jeton_confirmation` et `confirme: true`.
+Une nouvelle adresse invalide le jeton précédent. Répéter la même confirmation ne crée pas de doublon.
+
+Ce parcours de compositions n'utilise pas le compte fictif de `/compte` : son adresse est fournie
+pour la conversation. Le parcours ingrédients du nouveau chat conserve le compte fictif et les
+demandes échantillon ou expert de `demandes.py`. Utiliser exclusivement des données fictives pour ce prototype.
+Les demandes sont conservées dans `data/echantillons_demo.sqlite3` (ignoré par Git ; chemin configurable
+avec `ECHANTILLONS_DB`). Les sessions restent en mémoire et sont perdues au redémarrage, mais les demandes
+enregistrées restent consultables avec l'ancien `session_id`. Cet identifiant sert au filtrage du prototype ;
+il ne remplace pas une authentification de compte client.
+
+Aucune expédition ni commande commerciale n'est déclenchée. Le seul statut disponible est `enregistree`.
+Le scénario ne démontre pas les performances du LLM ou la compatibilité technique d'une composition.

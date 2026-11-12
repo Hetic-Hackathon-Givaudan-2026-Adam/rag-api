@@ -1,0 +1,20 @@
+[
+  {
+    "reference": "DEMO-BOIS-01",
+    "nom": "Bois doux",
+    "description": "Profil boisé avec une facette douce et crémeuse.",
+    "direction_olfactive": "boisé",
+    "application_demo": "savon solide",
+    "compatibilite": "a_valider",
+    "demonstration": true
+  },
+  {
+    "reference": "DEMO-BOIS-02",
+    "nom": "Bois frais",
+    "description": "Profil boisé avec une facette fraîche et végétale.",
+    "direction_olfactive": "boisé",
+    "application_demo": "savon solide",
+    "compatibilite": "a_valider",
+    "demonstration": true
+  }
+]

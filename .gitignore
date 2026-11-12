@@ -4,3 +4,5 @@ __pycache__/
 .env
 ngrok.yml
 data/demandes.json
+data/embeddings_cache*.npz
+data/echantillons_demo.sqlite3*

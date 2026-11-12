@@ -22,7 +22,7 @@ import ollama
 
 import demandes
 
-CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen2.5:3b")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen3.5:4b")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "bge-m3")
 DOSSIER = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.getenv("CATALOGUE_CSV", os.path.join(DOSSIER, "data", "catalogue_fragrances.csv"))
@@ -50,6 +50,7 @@ Règles :
 - Phrases courtes et simples, 60 mots maximum. Mots simples : frais, fruité, doux, boisé, tenace, linge propre...
 - Aucun mot technique (aldéhyde, lactonique, ozonique, nitrile, molécule...) et aucun nom d'ingrédient absent des extraits.
 - Jamais de prix, de délai, de quantité ni de promesse de résultat.
+- Les indications sur une matière ne valident pas le produit fini. Ne certifie ni conformité IFRA ni absence d'allergènes. La tenue sur mouillette ne prouve pas une tenue dans le produit fini, et une odeur naturelle ne prouve pas une origine naturelle.
 - Ne répète jamais une phrase déjà dite dans la conversation.
 - Réponds en français."""
 
@@ -456,8 +457,9 @@ def mettre_a_jour_brief(brief_actuel, message_client, dernier_message_assistant=
         actuel["odeur_precise"] = brief["odeur_precise"]
         reponse = ollama.chat(
             model=CHAT_MODEL,
+            think=False,
             format="json",
-            options={"temperature": 0},
+            options={"temperature": 0, "num_predict": 512},
             messages=[
                 {"role": "system", "content": PROMPT_BRIEF},
                 {"role": "user", "content": (
@@ -532,7 +534,7 @@ def fiche_texte(a):
         ("Description", a.get("description")),
         ("Recommandé pour", a.get("applications_recommandees")),
         ("Déconseillé pour", a.get("applications_deconseillees")),
-        ("Tenue", a.get("tenue")),
+        ("Tenue sur mouillette (pas sur le produit fini)", a.get("tenue")),
         ("Origine / nature", nature),
         ("Durabilité", a.get("durabilite")),
     ]
@@ -629,10 +631,8 @@ def infos_utiles(a, brief):
         if a.get("naturel_ou_synthetique"):
             infos.append(a["naturel_ou_synthetique"])
     tenue = _sans_accents(a.get("tenue", ""))
-    sur_linge = any(app in ("lessive liquide", "lessive en poudre", "adoucissant")
-                    for app in applications_demandees(brief.get("produit", "")))
     if "semaine" in tenue or "mois" in tenue:
-        infos.append("très tenace sur le linge" if sur_linge else "très tenace")
+        infos.append(f"tenue sur mouillette : {a['tenue']}")
     return infos
 
 
@@ -649,7 +649,7 @@ def fiche_simplifiee(a, brief):
     if a.get("applications_deconseillees"):
         lignes.append(f"Déconseillé pour : {a['applications_deconseillees']}")
     if a.get("tenue"):
-        lignes.append(f"Tenue : {a['tenue']}")
+        lignes.append(f"Tenue sur mouillette : {a['tenue']}")
     if a.get("durabilite"):
         lignes.append(f"Durabilité : {a['durabilite']}")
     if infos_utiles(a, brief):
@@ -757,7 +757,7 @@ class CatalogueRAG:
         messages += [{"role": m["role"], "content": m["content"]} for m in session["messages"][-NB_MESSAGES_LLM:]]
         messages.append({"role": "system", "content": consigne + "\nReste strictement sur le projet de fragrance du client."})
         messages.append({"role": "user", "content": contenu})
-        reponse = ollama.chat(model=CHAT_MODEL, messages=messages, options={"temperature": 0.3})
+        reponse = ollama.chat(model=CHAT_MODEL, messages=messages, think=False, options={"temperature": 0.3, "num_predict": 512})
         return reponse["message"]["content"].strip()
 
     # ----- Étapes -----
@@ -883,6 +883,17 @@ class CatalogueRAG:
     def tour(self, session, question, session_id=""):
         """Traite un message du client (la session est modifiée sur place). Renvoie un dict :
         reponse, etape, ingredients [(ingredient, score)], recapitulatif, suggestions, numero_demande."""
+        salutation = " ".join(re.sub(r"[^a-z\s]", " ", _sans_accents(question)).split())
+        texte_fixe = None
+        if re.fullmatch(r"(?:bonjour|bonsoir|salut|hello|coucou|hey)(?: (?:elia|a tous|tout le monde))?", salutation):
+            texte_fixe = "Bonjour ! Quel est votre besoin ?"
+        texte_fixe = texte_fixe or reponse_information_absente(question, self.ingredients)
+        categorie = demande_autre_par_mots(question)
+        if texte_fixe or categorie:
+            texte_fixe = texte_fixe or reponse_redirection(categorie)
+            session['messages'].extend([{'role': 'user', 'content': question}, {'role': 'assistant', 'content': texte_fixe}])
+            return {'reponse': texte_fixe, 'etape': 'redirection' if categorie else session['etape'],
+                    'ingredients': [], 'recapitulatif': session.get('recap_en_attente'), 'suggestions': [], 'numero_demande': None}
         dernier_assistant = next(
             (m["content"] for m in reversed(session["messages"]) if m["role"] == "assistant"), ""
         )
@@ -996,3 +1007,27 @@ class CatalogueRAG:
         # g. Propositions : exactement 2 ingrédients.
         texte, choisis = self._propositions(session, question, brief)
         return resultat(texte, "propositions", ingredients=choisis, suggestions=SUGGESTIONS_SUITE)
+
+
+def reponse_information_absente(question, ingredients):
+    """Informations non disponibles dans le catalogue ; le brief de la session reste intact."""
+    connus = {a["id"].upper() for a in ingredients}
+    absents = list(dict.fromkeys(i for i in re.findall(r"\bFR\d{3}\b", question.upper()) if i not in connus))
+    if absents:
+        return (
+            "Je ne trouve pas la référence " + ", ".join(absents) + " dans notre catalogue de démonstration. "
+            "Je ne peux donc pas lui attribuer de fiche ni de prix. Pouvez-vous vérifier la référence ?"
+        )
+    texte = _sans_accents(question)
+    if re.search(r"\b(prix|tarifs?|stocks?|livraison|quantite minimum|minimum de commande)\b", texte):
+        return (
+            "Les données disponibles ne contiennent pas de prix, de stock ni de délai de livraison. "
+            "Ces informations doivent être confirmées par votre interlocuteur commercial Givaudan."
+        )
+    if re.search(r"\b(certifier|certifiee?s?|certifications?|conforme|conformite|allergenes?)\b", texte):
+        return (
+            "Je ne peux pas certifier la conformité IFRA ni l'absence d'allergènes d'un produit fini "
+            "à partir de ce catalogue. Il faut vérifier les documents de la référence, le dosage, "
+            "le support et le marché avec un expert."
+        )
+    return None
