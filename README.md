@@ -2,8 +2,8 @@
 
 API FastAPI qui aide un client professionnel (marque de lessive, de shampoing, de savon...) à décrire
 le parfum qu'il souhaite pour son produit. Givaudan crée des parfums **sur mesure** : l'assistant ne vend
-rien. Il commence par comprendre le besoin, propose ensuite 2 ou 3 **pistes olfactives** illustrées par de
-vrais ingrédients du catalogue, puis affine avec le client pour préparer le brief envoyé au commercial.
+rien. Il commence par comprendre le besoin, propose ensuite **2 ingrédients** du catalogue, puis enregistre
+une demande d'échantillon ou de contact avec un expert (compte client fictif pour la démo).
 Jamais de prix, de délai ni de promesse de produit fini.
 
 Tout tourne en local avec Ollama (aucune API externe).
@@ -31,7 +31,13 @@ Le premier démarrage prend un peu de temps (calcul des embeddings du catalogue,
 `data/embeddings_cache_fragrances.npz`), les suivants sont rapides.
 
 ## 4. Tester
-Ouvrir **http://localhost:8000/docs** (Swagger) :
+**Le plus simple : la page de chat.** Ouvrir **http://localhost:8000/chat** pour discuter avec l'assistant
+comme un client. La page affiche l'étape et les ingrédients sous chaque réponse, les **réponses rapides**
+en boutons, le **récapitulatif en tableau**, la fiche brief à droite, des messages de test en un clic,
+un bouton **« Mes échantillons »** et un bouton « Recommencer ». Elle fonctionne aussi via ngrok
+(`https://VOTRE-ADRESSE.ngrok-free.app/chat`). Le fichier est `chat_test.html`.
+
+Avec le Swagger, ouvrir **http://localhost:8000/docs** :
 1. `POST /sessions` → *Try it out* → *Execute* : copier le `session_id`.
 2. `POST /ask` → coller le `session_id` dans le corps, écrire la `question` → *Execute*.
 3. Recommencer l'étape 2 avec le même `session_id` pour continuer la conversation.
@@ -41,96 +47,134 @@ Ouvrir **http://localhost:8000/docs** (Swagger) :
 |---|---|
 | `GET /health` | Vérifier que l'API et Ollama fonctionnent (`nb_ingredients`) |
 | `POST /sessions` | Démarrer une conversation : renvoie `session_id` et le message d'accueil |
-| `POST /ask` | Envoyer un message du client : réponse, étape, brief, ingrédients cités |
-| `GET /sessions/{id}` | Historique complet, brief et étape d'une conversation |
+| `POST /ask` | Envoyer un message du client (voir les champs de réponse ci-dessous) |
+| `GET /sessions/{id}` | Historique complet, brief, étape et récapitulatif en attente |
 | `DELETE /sessions/{id}` | Supprimer une conversation (bouton « recommencer ») |
+| `GET /echantillons` | Page « Mes échantillons » : demandes d'échantillon enregistrées |
+| `GET /demandes` | Toutes les demandes (filtre `?type=echantillon` ou `?type=expert`) |
+| `GET /compte` | Compte client fictif de la démo (`data/compte_demo.json`) |
 | `GET /ingredients` | Lister le catalogue (filtre `famille` facultatif, ex. `?famille=Boisé`) |
 | `GET /ingredients/{id}` | Détail d'un ingrédient (ex. `/ingredients/FR026`) |
+| `GET /chat` | Page web de test |
+
+**Champs de la réponse de `POST /ask`**
+
+| Champ | Contenu |
+|---|---|
+| `session_id` | à renvoyer au message suivant |
+| `reponse` | texte de l'assistant (récapitulatif compris) |
+| `etape` | `decouverte`, `propositions`, `recapitulatif`, `terminee`, `recentrage` ou `redirection` |
+| `brief` | `entreprise`, `projet`, `produit`, `odeur`, `odeur_precise`, `cible`, `contraintes`, `pays` |
+| `ingredients_proposes` | fiches des ingrédients cités (vide si l'assistant pose seulement une question) |
+| `recapitulatif` | `{type, lignes: [{information, detail}]}` à afficher en tableau, sinon `null` |
+| `suggestions` | réponses rapides à afficher en boutons (clic = envoyer ce texte) |
+| `numero_demande` | `ECH-DEMO-001`, `EXP-DEMO-001`... une fois la demande confirmée, sinon `null` |
 
 ## 6. Fonctionnement : sessions et étapes
 
-**L'API garde la conversation.** Le front n'envoie que le `session_id` et le nouveau message ; il n'a plus
-besoin de renvoyer l'historique. Si `session_id` est absent ou inconnu, une nouvelle session est créée et
-son identifiant est renvoyé. Les sessions sont gardées en mémoire (pas de base de données : elles sont
-perdues au redémarrage) et supprimées au bout de 2 heures.
+**L'API garde la conversation.** Le front n'envoie que le `session_id` et le nouveau message. Les sessions
+sont en mémoire (perdues au redémarrage) et supprimées au bout de 2 heures.
 
-**Une fiche brief est remplie au fil des messages** : `produit`, `ambiance`, `cible`, `contraintes`, `pays`.
-Seules les informations vraiment données par le client sont notées. Le modèle ne reçoit que les 10 derniers
-messages, mais le brief garde l'essentiel.
+**Le LLM sert à comprendre le client et à rédiger** : à chaque message, il met à jour la fiche brief
+(entreprise, projet, produit, odeur, cible, contraintes, pays) et repère l'intention (échantillon, expert, confirmer, annuler,
+infos) et l'ingrédient choisi. Une information n'est retenue que si le client l'a vraiment écrite.
 
-**C'est le code qui choisit l'étape**, pas le modèle (le petit modèle `qwen2.5:3b` suit mal les consignes
-longues) :
+**Le code décide de tout le reste**, avec des textes modèles fiables à 100 % :
 
 | Étape (`etape`) | Quand | Ce que fait l'assistant |
 |---|---|---|
-| `decouverte` | le produit ou l'ambiance n'est pas encore connu | reformule et pose une question ; **aucun ingrédient** (le catalogue ne lui est même pas fourni) |
-| `pistes` | produit et ambiance connus, rien encore proposé | résume le besoin, propose 2 ou 3 pistes avec des ingrédients, demande laquelle plaît le plus |
-| `affinage` | des pistes ont déjà été proposées | tient compte de la réaction du client, approfondit, demande ce qui manque encore (cible, contraintes...) ; quand le brief est complet, propose un récapitulatif pour les experts |
-| `recentrage` | message hors sujet (météo, sport...) | phrase polie puis question pour revenir au projet ; brief inchangé |
 | `redirection` | candidature, presse, fournisseur, signalement éthique | oriente vers la bonne page de givaudan.com |
+| `recentrage` | message hors sujet (météo, sport...) | phrase polie puis question pour revenir au projet ; brief inchangé |
+| `decouverte` | contexte (entreprise, projet) pas encore demandé, ou produit, odeur **précise** ou pays manquant | d'abord le contexte (voir ci-dessous), puis 1 ou 2 questions sur ce qui manque (« frais » est trop vague : il demande quel type de fraîcheur) ; aucun ingrédient |
+| `propositions` | brief suffisant | **exactement 2 ingrédients** du catalogue, puis « Souhaitez-vous recevoir un échantillon ou être recontacté par un expert ? » |
+| `recapitulatif` | le client veut un échantillon ou un expert | tableau à confirmer (adresse ou e-mail du compte démo) |
+| `terminee` | le client confirme | demande enregistrée dans `data/demandes.json`, avec un numéro |
 
-La question de fin de chaque réponse est choisie par le code d'après ce qui manque dans le brief :
-l'assistant ne repose donc jamais une question déjà répondue.
+Détails des propositions : les ingrédients déconseillés pour le produit sont exclus et ceux recommandés
+favorisés ; une fiche simplifiée, sans jargon, est donnée au modèle ; chaque phrase qu'il écrit est vérifiée
+(elle ne doit parler que d'odeurs présentes dans la fiche de l'ingrédient), sinon le code la remplace par
+une phrase construite à partir des notes. Les infos utiles (« facilement biodégradable » si le client veut
+de l'écologique, « très tenace sur le linge »...) sont ajoutées par le code.
 
-### Exemple de conversation en 3 messages
+**Contexte du projet, sans s'éterniser.** Le message d'accueil demande l'entreprise et le projet en une
+phrase. Si le client n'en parle pas, l'assistant le demande **une fois** ; s'il manque encore une partie
+(ex. l'entreprise est donnée mais pas le projet), il relance **une fois**. Au plus 2 questions, puis il passe
+à l'odeur quoi qu'il arrive. Quand le contexte arrive, il répond « Merci pour ces précisions, c'est un beau
+projet ! ». L'entreprise et le contexte apparaissent dans les récapitulatifs ; ils ne servent pas à choisir
+les ingrédients (seuls le produit, l'odeur, la cible et les contraintes comptent).
 
-**1.** `POST /sessions` → `{"session_id": "63205d24-…", "message_accueil": "Bonjour et bienvenue chez Givaudan ! Parlez-moi de votre projet : quel parfum imaginez-vous, et pour quel produit ?"}`
+**Le contexte aide le client qui n'a pas d'idée.** Les exemples de la question sur l'odeur sont adaptés au
+projet (sportif : « fraîche et aérienne, agrumes énergisants, marine et vivifiante » ; estival, haut de gamme,
+familial, hivernal, nature...) et proposés en boutons, avec « Je n'ai pas d'idée, conseillez-moi ». Si le
+client répond « pas d'idée », « je ne sais pas », « conseillez-moi »..., l'assistant propose 3 directions
+adaptées au contexte au lieu de reposer la même question :
 
-**2.** `POST /ask`
+> Pas de souci, je vais vous aider ! Pour un projet sportif comme le vôtre, ces directions fonctionnent souvent bien :
+> - Fraîche et aérienne
+> - Agrumes énergisants
+> - Marine et vivifiante
+>
+> Laquelle vous tente le plus ? Vous pouvez aussi en combiner deux.
+
+**Filets de sécurité du code sur la fiche** : produits courants (eau de parfum, bougie, gel douche...) et
+pays reconnus directement, petites fautes corrigées sur les odeurs (« lingue » → linge), un nom d'entreprise
+n'est jamais pris pour un pays.
+
+« Annuler » au récapitulatif ramène aux propositions. Jamais de prix, de délai ni de quantité.
+
+### Exemple avec contexte en une phrase
+
+| Client | Assistant | `etape` |
+|---|---|---|
+| *(accueil)* | Bonjour et bienvenue chez Givaudan ! Pour commencer, présentez-moi en une phrase votre entreprise et le projet sur lequel vous travaillez. | |
+| Je suis JB Industry, je veux créer une brume pour les sportifs pour les futurs Jeux olympiques en partenariat avec Nike. | Merci pour ces précisions, c'est un beau projet ! Quelle odeur aimeriez-vous (linge propre, agrumes, fleurs, boisé…) et dans quel pays votre produit sera-t-il vendu ? | `decouverte` |
+| Une brume fraîche et marine, vendue en France | Deux ingrédients de notre catalogue évoquent une odeur fraîche et marine :<br>- Ultrazur™ — FR027 : note marine et aérienne, avec une touche d'agrumes. Très tenace.<br>- Adoxal — FR026 : …<br>Leur intégration dans votre formule reste à valider avec nos parfumeurs. Souhaitez-vous recevoir un échantillon ou être recontacté par un expert ? | `propositions` |
+| Je préfère parler à un expert | Récapitulatif : Entreprise JB Industry ; Contexte Création d'une brume pour les Jeux olympiques, en partenariat avec Nike ; Votre projet Brume, France ; Odeur fraîche et marine ; Cible sportifs ; Ingrédients… ; Contact… Confirmez-vous que nous transmettions ce projet à un expert Givaudan ? | `recapitulatif` |
+
+### Exemple complet (lessive, client qui donne son entreprise)
+
+| Client | Assistant | `etape` |
+|---|---|---|
+| Bonjour, je développe une lessive liquide écologique pour les familles. Je cherche une odeur fraîche. | Pour le suivi de votre projet, pour quelle entreprise travaillez-vous ? | `decouverte` |
+| Je travaille chez Maison Lumen, on lance une nouvelle gamme de lessives en supermarché | Quel type de fraîcheur imaginez-vous (linge propre, agrumes, marine…) et dans quel pays la lessive sera-t-elle vendue ? | `decouverte` |
+| Plutôt linge propre, pour la France. | Deux ingrédients de notre catalogue évoquent une odeur de linge propre :<br>- Peonile™ — FR004 : note florale et fraîche, avec une touche de géranium et de pamplemousse. Très tenace sur le linge.<br>- Adoxal — FR026 : note marine et propre. Facilement biodégradable.<br>Les deux sont recommandés pour la lessive liquide. Leur intégration dans votre formule reste à valider avec nos parfumeurs. Souhaitez-vous recevoir un échantillon ou être recontacté par un expert ? | `propositions` |
+| Je voudrais essayer Adoxal | Voici le récapitulatif de votre demande d'échantillon : Ingrédient FR026 — Adoxal ; Votre projet Lessive liquide, écologique, France ; Demande Un échantillon ; Adresse 12 rue des Lilas, 75011 Paris, France. Confirmez-vous cette demande et cette adresse ? | `recapitulatif` |
+| Oui, je confirme | Votre demande ECH-DEMO-001 est enregistrée. Vous pouvez suivre son statut dans « Mes échantillons ». | `terminee` |
+
+Requête :
 ```json
-{ "session_id": "63205d24-…", "question": "Je cherche un parfum d'été", "nb_resultats": 3 }
+{ "session_id": "c0ff749a-…", "question": "Je voudrais essayer Adoxal" }
 ```
+Réponse (raccourcie) :
 ```json
 {
-  "session_id": "63205d24-…",
-  "reponse": "Parfait, vous souhaitez un parfum qui évoque l'été pour votre produit. C'est une idée très lumineuse.\n\nPour quel produit imaginez-vous ce parfum : une lessive, un shampoing, un savon, une bougie… ?",
-  "etape": "decouverte",
-  "brief": { "produit": "", "ambiance": "été", "cible": "", "contraintes": "", "pays": "" },
-  "ingredients_proposes": []
+  "session_id": "c0ff749a-…",
+  "reponse": "Voici le récapitulatif de votre demande d'échantillon :\n- Ingrédient : FR026 — Adoxal\n- …\n\nConfirmez-vous cette demande et cette adresse ?",
+  "etape": "recapitulatif",
+  "brief": { "produit": "lessive liquide", "odeur": "linge propre", "odeur_precise": true, "cible": "familles", "contraintes": "écologique", "pays": "France" },
+  "ingredients_proposes": [],
+  "recapitulatif": {
+    "type": "echantillon",
+    "lignes": [
+      { "information": "Ingrédient", "detail": "FR026 — Adoxal" },
+      { "information": "Votre projet", "detail": "Lessive liquide, écologique, France" },
+      { "information": "Demande", "detail": "Un échantillon" },
+      { "information": "Adresse", "detail": "12 rue des Lilas, 75011 Paris, France" }
+    ]
+  },
+  "suggestions": ["Oui, je confirme", "Annuler"],
+  "numero_demande": null
 }
 ```
-
-**3.** `POST /ask`
-```json
-{ "session_id": "63205d24-…", "question": "C'est pour une lessive liquide", "nb_resultats": 3 }
-```
-```json
-{
-  "session_id": "63205d24-…",
-  "reponse": "Pour une lessive liquide, voici quelques pistes olfactives qui évoquent l'été :\n\n… — Nectaryl (FR011) : une note fruitée et naturelle…\n\n… — Lemonile™ (FR006) : une note intense et fraîche…\n\nMenthe fraîche — Freskomenthe™ (FR024) : une note fraîche…\n\nQuelle piste vous parle le plus ?",
-  "etape": "pistes",
-  "brief": { "produit": "lessive", "ambiance": "été", "cible": "", "contraintes": "", "pays": "" },
-  "ingredients_proposes": [
-    { "id": "FR011", "nom": "Nectaryl", "famille_olfactive": "Fruité", "...": "...", "score": 0.68 },
-    { "id": "FR006", "nom": "Lemonile™", "...": "..." },
-    { "id": "FR024", "nom": "Freskomenthe™", "...": "..." }
-  ]
-}
-```
-
-**4.** `POST /ask`
-```json
-{ "session_id": "63205d24-…", "question": "Je préfère la piste marine, et ce serait pour des familles", "nb_resultats": 3 }
-```
-```json
-{
-  "session_id": "63205d24-…",
-  "reponse": "Ultrazur™ (FR027) : une note fraîche et ozonique…\n\nNectaryl (FR011) : …idéale pour des familles.\n\nAvez-vous des contraintes particulières : ingrédients d'origine naturelle, biodégradabilité… ?",
-  "etape": "affinage",
-  "brief": { "produit": "lessive", "ambiance": "marine", "cible": "familles", "contraintes": "", "pays": "" },
-  "ingredients_proposes": [ { "id": "FR027", "nom": "Ultrazur™", "...": "..." }, { "id": "FR011", "nom": "Nectaryl", "...": "..." } ]
-}
-```
-
-`ingredients_proposes` ne contient que les ingrédients cités dans la réponse **et** fournis par le
-catalogue : la liste est vide en découverte, recentrage et redirection.
 
 ## 7. Autres règles appliquées dans le code
-- **Usage** : si le client cite son produit (lessive, linge, shampoing, savon, déodorant, nettoyant,
-  javel...), les ingrédients recommandés pour ce produit sont favorisés et ceux déconseillés sont exclus.
-  Pour un produit inconnu du catalogue (bougie, gel douche...), seule la proximité de sens compte.
-- Les identifiants d'ingrédients oubliés ou mal recopiés par le modèle sont corrigés, et les passages
-  recopiés de la réponse précédente sont retirés.
+- **Usage** : si le client cite son produit (lessive liquide, linge, shampoing, savon, déodorant,
+  nettoyant, javel...), les ingrédients recommandés pour ce produit sont favorisés et ceux déconseillés
+  exclus. Pour un produit inconnu du catalogue (bougie, gel douche...), seule la proximité de sens compte.
+- **Jargon** : les mots techniques du catalogue (aldéhydé, lactonique, ozonique...) sont traduits en mots
+  simples (propre, crémeux, aérien...).
+- **Demandes** : `data/demandes.json` est créé au premier enregistrement (écriture sûre). Pour repartir de
+  zéro, supprimer ce fichier.
 
 ## 8. Accès depuis un autre ordinateur (même Wi-Fi)
 1. Sur le PC qui lance l'API : `ipconfig` → noter l'**Adresse IPv4** (ex. 192.168.1.25).

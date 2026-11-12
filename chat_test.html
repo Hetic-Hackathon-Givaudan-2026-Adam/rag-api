@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test assistant de brief</title>
+<style>
+  :root {
+    --bg: #f6f4f1; --panel: #ffffff; --texte: #1f1d1a; --doux: #6b665f; --bord: #e4dfd8;
+    --accent: #7a3e6b; --accent-texte: #ffffff; --bulle-client: #7a3e6b; --bulle-assistant: #ffffff;
+    --chip: #f1e8ee; --erreur: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161514; --panel: #201f1d; --texte: #ece8e3; --doux: #a19b93; --bord: #34312d;
+      --accent: #c48ab6; --accent-texte: #1a1418; --bulle-client: #6d3a60; --bulle-assistant: #262422;
+      --chip: #3a2c36; --erreur: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--texte); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 12px 16px;
+           border-bottom: 1px solid var(--bord); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; flex: 1; min-width: 180px; }
+  header label { font-size: 13px; color: var(--doux); display: flex; gap: 6px; align-items: center; }
+  input, button { font: inherit; }
+  header input { width: 220px; max-width: 60vw; padding: 4px 8px; border: 1px solid var(--bord);
+                 border-radius: 6px; background: var(--bg); color: var(--texte); }
+  button { cursor: pointer; border: 1px solid var(--bord); background: var(--panel); color: var(--texte);
+           border-radius: 8px; padding: 6px 12px; }
+  button.principal { background: var(--accent); color: var(--accent-texte); border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  main { display: grid; grid-template-columns: 1fr 280px; gap: 16px; max-width: 1100px; margin: 0 auto;
+         padding: 16px; height: calc(100vh - 62px); }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; height: auto; } }
+  #conversation { display: flex; flex-direction: column; min-height: 0; background: var(--panel);
+                  border: 1px solid var(--bord); border-radius: 12px; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px;
+              min-height: 300px; }
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 14px; white-space: normal; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; background: var(--bulle-client); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.assistant { align-self: flex-start; background: var(--bulle-assistant); border: 1px solid var(--bord);
+                   border-bottom-left-radius: 4px; }
+  .msg.erreur { align-self: center; color: var(--erreur); background: none; font-size: 13px; }
+  .meta { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+  .etape { padding: 2px 8px; border-radius: 99px; background: var(--chip); color: var(--accent); font-weight: 600; }
+  .chip { padding: 2px 8px; border-radius: 99px; border: 1px solid var(--bord); color: var(--doux); }
+  .id { font-weight: 600; color: var(--accent); }
+  .attente { color: var(--doux); font-style: italic; }
+  form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--bord); }
+  form input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--bord); border-radius: 8px;
+               background: var(--bg); color: var(--texte); }
+  aside { background: var(--panel); border: 1px solid var(--bord); border-radius: 12px; padding: 16px;
+          overflow-y: auto; }
+  aside h2 { font-size: 14px; margin: 0 0 8px; }
+  dl { margin: 0 0 16px; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 14px; }
+  dt { color: var(--doux); }
+  dd { margin: 0; }
+  dd.vide { color: var(--doux); font-style: italic; }
+  .petit { font-size: 12px; color: var(--doux); overflow-wrap: anywhere; }
+  .exemples { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+  .exemples button { text-align: left; font-size: 13px; }
+  .suggestions { display: flex; flex-wrap: wrap; gap: 8px; align-self: flex-start; }
+  .suggestions button { border-color: var(--accent); color: var(--accent); border-radius: 99px; font-size: 14px; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--bord); vertical-align: top; }
+  th { color: var(--doux); font-weight: 600; white-space: nowrap; }
+  .numero { font-weight: 700; color: var(--accent); }
+  dialog { border: 1px solid var(--bord); border-radius: 12px; background: var(--panel); color: var(--texte);
+           width: min(720px, calc(100vw - 32px)); padding: 16px; }
+  dialog::backdrop { background: rgba(0, 0, 0, .4); }
+  dialog h2 { margin: 0 0 8px; font-size: 16px; }
+  .table-defile { overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Assistant de brief Givaudan — page de test</h1>
+  <label>API <input id="api" value="http://localhost:8000"></label>
+  <button id="ouvrir-echantillons">Mes échantillons</button>
+  <button id="recommencer">Recommencer</button>
+</header>
+
+<dialog id="fenetre-echantillons">
+  <h2>Mes échantillons</h2>
+  <p class="petit">Demandes d'échantillon enregistrées (GET /echantillons) — compte de démo.</p>
+  <div class="table-defile" id="liste-echantillons"></div>
+  <p><button id="fermer-echantillons">Fermer</button></p>
+</dialog>
+
+<main>
+  <section id="conversation">
+    <div id="messages"></div>
+    <form id="formulaire">
+      <input id="question" placeholder="Écrivez votre message…" autocomplete="off" autofocus>
+      <button class="principal" id="envoyer">Envoyer</button>
+    </form>
+  </section>
+
+  <aside>
+    <h2>Étape actuelle</h2>
+    <p><span class="etape" id="etape">—</span></p>
+
+    <h2>Fiche brief</h2>
+    <dl id="brief"></dl>
+
+    <h2>Messages de test</h2>
+    <div class="exemples">
+      <button>Je suis JB Industry, je veux créer une brume pour les sportifs pour les futurs Jeux olympiques en partenariat avec Nike.</button>
+      <button>Une brume fraîche et marine, vendue en France</button>
+      <button>Bonjour, je développe une lessive liquide écologique pour les familles. Je cherche une odeur fraîche.</button>
+      <button>Plutôt linge propre, pour la France.</button>
+      <button>Je préfère parler à un expert</button>
+      <button>Il fait beau aujourd'hui non ?</button>
+      <button>Je cherche un parfum boisé chaleureux pour un savon haut de gamme vendu en Belgique</button>
+      <button>Je veux postuler chez Givaudan</button>
+    </div>
+
+    <h2>Session</h2>
+    <p class="petit" id="session">—</p>
+  </aside>
+</main>
+
+<script>
+  const CHAMPS = { entreprise: "Entreprise", projet: "Projet", produit: "Produit", odeur: "Odeur", cible: "Cible", contraintes: "Contraintes", pays: "Pays" };
+  let sessionId = null;
+  // Servie par l'API (http://localhost:8000/chat ou via ngrok) : on appelle la même adresse.
+  if (location.protocol.startsWith("http")) document.getElementById("api").value = location.origin;
+
+  const $ = (id) => document.getElementById(id);
+  const api = () => $("api").value.replace(/\/+$/, "");
+
+  async function appel(methode, chemin, corps) {
+    const reponse = await fetch(api() + chemin, {
+      method: methode,
+      headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+      body: corps ? JSON.stringify(corps) : undefined,
+    });
+    const donnees = await reponse.json().catch(() => ({}));
+    if (!reponse.ok) throw new Error(donnees.detail || `Erreur ${reponse.status}`);
+    return donnees;
+  }
+
+  // Texte sûr : on échappe le HTML, puis on met en forme **gras**, les FRxxx et les retours à la ligne.
+  function miseEnForme(texte) {
+    const sur = texte.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return sur
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\b(FR\d{3})\b/g, '<span class="id">$1</span>')
+      .replace(/\n/g, "<br>");
+  }
+
+  const echapper = (t) => String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  function tableau(entetes, lignes) {
+    return "<table><thead><tr>" + entetes.map((e) => `<th>${echapper(e)}</th>`).join("") + "</tr></thead><tbody>" +
+      lignes.map((l) => "<tr>" + l.map((c) => `<td>${c}</td>`).join("") + "</tr>").join("") + "</tbody></table>";
+  }
+
+  // Récapitulatif : phrase d'intro, vrai tableau, puis la question de confirmation.
+  function contenuRecap(texte, recap) {
+    const paragraphes = texte.split(/\n\n/);
+    const avant = paragraphes.slice(0, -1).join("\n\n").split(/\n/).filter((l) => !l.startsWith("- ")).join("\n");
+    const lignes = recap.lignes.map((l) => [`<strong>${echapper(l.information)}</strong>`, miseEnForme(l.detail)]);
+    return miseEnForme(avant) + "<table><tbody>" + lignes.map((l) => `<tr><td>${l[0]}</td><td>${l[1]}</td></tr>`).join("") +
+      "</tbody></table>" + miseEnForme(paragraphes[paragraphes.length - 1]);
+  }
+
+  function afficherSuggestions(suggestions) {
+    document.querySelectorAll(".suggestions").forEach((s) => s.remove());
+    if (!suggestions || !suggestions.length) return;
+    const div = document.createElement("div");
+    div.className = "suggestions";
+    suggestions.forEach((texte) => {
+      const b = document.createElement("button");
+      b.textContent = texte;
+      b.addEventListener("click", () => envoyer(texte));
+      div.appendChild(b);
+    });
+    $("messages").appendChild(div);
+    $("messages").scrollTop = $("messages").scrollHeight;
+  }
+
+  function ajouterMessage(role, texte, meta) {
+    const div = document.createElement("div");
+    div.className = "msg " + role;
+    div.innerHTML = meta && meta.recapitulatif ? contenuRecap(texte, meta.recapitulatif) : miseEnForme(texte);
+    if (meta && meta.numero) div.innerHTML = div.innerHTML.replace(meta.numero, `<span class="numero">${meta.numero}</span>`);
+    if (meta) {
+      const m = document.createElement("div");
+      m.className = "meta";
+      m.innerHTML = `<span class="etape">${meta.etape}</span>` +
+        meta.ingredients.map((i) => `<span class="chip">${i.id} · ${miseEnForme(i.nom)}</span>`).join("");
+      div.appendChild(m);
+    }
+    $("messages").appendChild(div);
+    $("messages").scrollTop = $("messages").scrollHeight;
+    return div;
+  }
+
+  function afficherBrief(brief, etape) {
+    $("brief").innerHTML = Object.entries(CHAMPS).map(([cle, libelle]) => {
+      const valeur = (brief && brief[cle]) || "";
+      return `<dt>${libelle}</dt><dd class="${valeur ? "" : "vide"}">${valeur ? miseEnForme(valeur) : "pas encore précisé"}</dd>`;
+    }).join("");
+    if (etape) $("etape").textContent = etape;
+  }
+
+  async function nouvelleSession() {
+    $("messages").innerHTML = "";
+    afficherBrief({}, "decouverte");
+    try {
+      const s = await appel("POST", "/sessions");
+      sessionId = s.session_id;
+      $("session").textContent = sessionId;
+      ajouterMessage("assistant", s.message_accueil);
+    } catch (e) {
+      ajouterMessage("erreur", `Impossible de joindre l'API (${e.message}). Vérifie qu'elle tourne sur ${api()}.`);
+    }
+  }
+
+  async function envoyer(question) {
+    question = question.trim();
+    if (!question) return;
+    $("question").value = "";
+    $("envoyer").disabled = true;
+    afficherSuggestions([]);
+    ajouterMessage("user", question);
+    const attente = ajouterMessage("assistant attente", "L'assistant réfléchit…");
+    try {
+      const d = await appel("POST", "/ask", { session_id: sessionId, question });
+      attente.remove();
+      if (d.session_id !== sessionId) { sessionId = d.session_id; $("session").textContent = sessionId; }
+      ajouterMessage("assistant", d.reponse, { etape: d.etape, ingredients: d.ingredients_proposes,
+        recapitulatif: d.recapitulatif, numero: d.numero_demande });
+      afficherSuggestions(d.suggestions);
+      afficherBrief(d.brief, d.etape);
+    } catch (e) {
+      attente.remove();
+      ajouterMessage("erreur", e.message);
+    } finally {
+      $("envoyer").disabled = false;
+      $("question").focus();
+    }
+  }
+
+  $("formulaire").addEventListener("submit", (e) => { e.preventDefault(); envoyer($("question").value); });
+  document.querySelectorAll(".exemples button").forEach((b) => b.addEventListener("click", () => envoyer(b.textContent)));
+  $("recommencer").addEventListener("click", async () => {
+    if (sessionId) { try { await appel("DELETE", `/sessions/${sessionId}`); } catch (e) {} }
+    nouvelleSession();
+  });
+  $("api").addEventListener("change", nouvelleSession);
+
+  $("ouvrir-echantillons").addEventListener("click", async () => {
+    $("liste-echantillons").innerHTML = "<p class='attente'>Chargement…</p>";
+    $("fenetre-echantillons").showModal();
+    try {
+      const liste = await appel("GET", "/echantillons");
+      $("liste-echantillons").innerHTML = liste.length
+        ? tableau(["Numéro", "Date", "Ingrédient", "Projet", "Statut"], liste.slice().reverse().map((d) => [
+            `<span class="numero">${echapper(d.numero)}</span>`,
+            echapper(new Date(d.date).toLocaleString("fr-FR")),
+            echapper(`${d.ingredient.id} — ${d.ingredient.nom}`),
+            echapper([d.brief.produit, d.brief.pays].filter(Boolean).join(", ")),
+            echapper(d.statut),
+          ]))
+        : "<p>Aucune demande d'échantillon pour l'instant.</p>";
+    } catch (e) {
+      $("liste-echantillons").innerHTML = `<p class="msg erreur">${echapper(e.message)}</p>`;
+    }
+  });
+  $("fermer-echantillons").addEventListener("click", () => $("fenetre-echantillons").close());
+
+  nouvelleSession();
+</script>
+</body>
+</html>
